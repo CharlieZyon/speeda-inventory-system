@@ -42,13 +42,14 @@ const SEED_BRANCHES = [
 ];
 
 async function seedBranches() {
+  const upsert = db.prepare(
+    `INSERT INTO branches (branch_name, password) VALUES (?, ?)
+     ON CONFLICT(branch_name) DO UPDATE SET password = excluded.password`
+  );
+
   for (const name of SEED_BRANCHES) {
     const hashedPassword = await bcrypt.hash(name, 10);
-    db.run(
-      `INSERT INTO branches (branch_name, password) VALUES (?, ?)
-       ON CONFLICT(branch_name) DO UPDATE SET password = excluded.password`,
-      [name, hashedPassword]
-    );
+    upsert.run(name, hashedPassword);
   }
   console.log(`All ${SEED_BRANCHES.length} branch accounts ready (password = branch name)`);
 }
@@ -56,63 +57,57 @@ async function seedBranches() {
 // AUTHENTICATION ENDPOINTS
 
 // Login
-app.post('/api/auth/login', (req, res) => {
+app.post('/api/auth/login', async (req, res) => {
   const { branchName, password } = req.body;
 
   if (!branchName || !password) {
     return res.status(400).json({ error: 'Branch name and password are required' });
   }
 
-  db.get(
-    'SELECT * FROM branches WHERE branch_name = ?',
-    [branchName],
-    async (err, branch) => {
-      if (err) {
-        return res.status(500).json({ error: 'Database error' });
-      }
+  try {
+    const branch = db.prepare('SELECT * FROM branches WHERE branch_name = ?').get(branchName);
 
-      if (!branch) {
-        return res.status(401).json({ error: 'Invalid branch name or password' });
-      }
-
-      const validPassword = await bcrypt.compare(password, branch.password);
-
-      if (!validPassword) {
-        return res.status(401).json({ error: 'Invalid branch name or password' });
-      }
-
-      const token = jwt.sign(
-        { id: branch.id, branchName: branch.branch_name },
-        JWT_SECRET,
-        { expiresIn: '7d' }
-      );
-
-      res.json({
-        message: 'Login successful',
-        token,
-        branch: {
-          id: branch.id,
-          branchName: branch.branch_name
-        }
-      });
+    if (!branch) {
+      return res.status(401).json({ error: 'Invalid branch name or password' });
     }
-  );
+
+    const validPassword = await bcrypt.compare(password, branch.password);
+
+    if (!validPassword) {
+      return res.status(401).json({ error: 'Invalid branch name or password' });
+    }
+
+    const token = jwt.sign(
+      { id: branch.id, branchName: branch.branch_name },
+      JWT_SECRET,
+      { expiresIn: '7d' }
+    );
+
+    res.json({
+      message: 'Login successful',
+      token,
+      branch: {
+        id: branch.id,
+        branchName: branch.branch_name
+      }
+    });
+  } catch (err) {
+    res.status(500).json({ error: 'Database error' });
+  }
 });
 
 // INVENTORY ENDPOINTS
 
 // Get all units for current branch
 app.get('/api/inventory', authenticateToken, (req, res) => {
-  db.all(
-    'SELECT * FROM units WHERE branch_id = ? ORDER BY created_at DESC',
-    [req.user.id],
-    (err, units) => {
-      if (err) {
-        return res.status(500).json({ error: 'Database error' });
-      }
-      res.json(units);
-    }
-  );
+  try {
+    const units = db.prepare(
+      'SELECT * FROM units WHERE branch_id = ? ORDER BY created_at DESC'
+    ).all(req.user.id);
+    res.json(units);
+  } catch (err) {
+    res.status(500).json({ error: 'Database error' });
+  }
 });
 
 // Add new unit
@@ -123,23 +118,17 @@ app.post('/api/inventory', authenticateToken, (req, res) => {
     return res.status(400).json({ error: 'Unit name, color, and battery are required' });
   }
 
-  db.run(
-    `INSERT INTO units (branch_id, unit_name, color, battery, has_charger, has_tarpal, problem)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`,
-    [req.user.id, unitName, color, battery, hasCharger, hasTarpal, problem || ''],
-    function (err) {
-      if (err) {
-        return res.status(500).json({ error: 'Database error' });
-      }
+  try {
+    const result = db.prepare(
+      `INSERT INTO units (branch_id, unit_name, color, battery, has_charger, has_tarpal, problem)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`
+    ).run(req.user.id, unitName, color, battery, hasCharger, hasTarpal, problem || '');
 
-      db.get('SELECT * FROM units WHERE id = ?', [this.lastID], (err, unit) => {
-        if (err) {
-          return res.status(500).json({ error: 'Database error' });
-        }
-        res.json({ message: 'Unit added successfully', unit });
-      });
-    }
-  );
+    const unit = db.prepare('SELECT * FROM units WHERE id = ?').get(result.lastInsertRowid);
+    res.json({ message: 'Unit added successfully', unit });
+  } catch (err) {
+    res.status(500).json({ error: 'Database error' });
+  }
 });
 
 // Update unit
@@ -147,44 +136,40 @@ app.put('/api/inventory/:id', authenticateToken, (req, res) => {
   const { id } = req.params;
   const { unitName, color, battery, hasCharger, hasTarpal, problem } = req.body;
 
-  db.run(
-    `UPDATE units
-     SET unit_name = ?, color = ?, battery = ?, has_charger = ?, has_tarpal = ?, problem = ?
-     WHERE id = ? AND branch_id = ?`,
-    [unitName, color, battery, hasCharger, hasTarpal, problem || '', id, req.user.id],
-    function (err) {
-      if (err) {
-        return res.status(500).json({ error: 'Database error' });
-      }
+  try {
+    const result = db.prepare(
+      `UPDATE units
+       SET unit_name = ?, color = ?, battery = ?, has_charger = ?, has_tarpal = ?, problem = ?
+       WHERE id = ? AND branch_id = ?`
+    ).run(unitName, color, battery, hasCharger, hasTarpal, problem || '', id, req.user.id);
 
-      if (this.changes === 0) {
-        return res.status(404).json({ error: 'Unit not found' });
-      }
-
-      res.json({ message: 'Unit updated successfully' });
+    if (result.changes === 0) {
+      return res.status(404).json({ error: 'Unit not found' });
     }
-  );
+
+    res.json({ message: 'Unit updated successfully' });
+  } catch (err) {
+    res.status(500).json({ error: 'Database error' });
+  }
 });
 
 // Delete unit
 app.delete('/api/inventory/:id', authenticateToken, (req, res) => {
   const { id } = req.params;
 
-  db.run(
-    'DELETE FROM units WHERE id = ? AND branch_id = ?',
-    [id, req.user.id],
-    function (err) {
-      if (err) {
-        return res.status(500).json({ error: 'Database error' });
-      }
+  try {
+    const result = db.prepare(
+      'DELETE FROM units WHERE id = ? AND branch_id = ?'
+    ).run(id, req.user.id);
 
-      if (this.changes === 0) {
-        return res.status(404).json({ error: 'Unit not found' });
-      }
-
-      res.json({ message: 'Unit deleted successfully' });
+    if (result.changes === 0) {
+      return res.status(404).json({ error: 'Unit not found' });
     }
-  );
+
+    res.json({ message: 'Unit deleted successfully' });
+  } catch (err) {
+    res.status(500).json({ error: 'Database error' });
+  }
 });
 
 // SEARCH ENDPOINT - Search across all branches
@@ -195,20 +180,18 @@ app.get('/api/search', authenticateToken, (req, res) => {
     return res.status(400).json({ error: 'Search query is required' });
   }
 
-  db.all(
-    `SELECT units.*, branches.branch_name
-     FROM units
-     JOIN branches ON units.branch_id = branches.id
-     WHERE units.unit_name LIKE ?
-     ORDER BY branches.branch_name, units.created_at DESC`,
-    [`%${query}%`],
-    (err, results) => {
-      if (err) {
-        return res.status(500).json({ error: 'Database error' });
-      }
-      res.json(results);
-    }
-  );
+  try {
+    const results = db.prepare(
+      `SELECT units.*, branches.branch_name
+       FROM units
+       JOIN branches ON units.branch_id = branches.id
+       WHERE units.unit_name LIKE ?
+       ORDER BY branches.branch_name, units.created_at DESC`
+    ).all(`%${query}%`);
+    res.json(results);
+  } catch (err) {
+    res.status(500).json({ error: 'Database error' });
+  }
 });
 
 // Start server
