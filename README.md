@@ -1,4 +1,4 @@
-# Speada E-Bike Inventory System v1.0
+# Speeda E-Bike Inventory System v1.0
 
 A clean and modern inventory management system for Speada e-bike chain stores. This system allows multiple branches to manage their inventory and search across all branches for specific e-bike models.
 
